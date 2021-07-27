@@ -2,11 +2,10 @@
 #include <linux/device.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <asm/uaccess.h>
 #include <linux/uaccess.h>
 
+
 static int device_open(struct inode *, struct file *);
-static ssize_t device_read(struct file *, char *, unsigned long, loff_t *);
 static ssize_t device_write(struct file *, const char *, unsigned long int, loff_t *);
 static int device_release(struct inode *, struct file *);
 
@@ -21,7 +20,7 @@ static char *msg_Ptr;
 static int Device_Open = 0;
 static char msg[BUF_LEN];
 
-static int mychardev_uevent(struct device *dev, struct kobj_uevent_env *env)
+static int mychardev_uevent(struct device * dev, struct kobj_uevent_env *env)
 {
     add_uevent_var(env, "DEVMODE=%#o", 0777);
     return 0;
@@ -29,7 +28,6 @@ static int mychardev_uevent(struct device *dev, struct kobj_uevent_env *env)
 
 static struct file_operations fops = {.owner = THIS_MODULE,
                                       .open = device_open,
-                                      .read = device_read,
                                       .write = device_write,
                                       .release = device_release};
 
@@ -56,7 +54,6 @@ static int __init start_chardev(void)
         printk(KERN_ERR "chardev: cdev_add() error %d\n", err);
         return err;
     }
-    printk(KERN_ERR "chardev: cdev_add() error %d\n", dev_no);
     device_create(chardev_class, NULL, dev_no, NULL, DEVICE_NAME);
 
     return 0;
@@ -73,7 +70,8 @@ static void __exit stop_chardev(void)
 /* Called when a process opens chardev */
 static int device_open(struct inode *inode, struct file *file)
 {
-    static int counter = 0;
+    static int counter;
+    counter = 0;
 
     if (Device_Open)
         return -EBUSY;
@@ -96,41 +94,6 @@ static int device_release(struct inode *inode, struct file *filp)
     module_put(THIS_MODULE);
 
     return 0;
-}
-
-/* Called when a process reads from chardev. Returns, and sets *offset to, the number of bytes read. */
-static ssize_t device_read(struct file *filp, char *buffer, unsigned long length, loff_t *offset)
-{
-    /*
-   * Number of bytes actually written to the buffer
-   */
-    int bytes_read = 0;
-
-    /*
-   * If we're at the end of the message, return 0 signifying end of file.
-   */
-    if (*msg_Ptr == 0)
-        return 0;
-
-    /*
-   * Actually put the data into the buffer
-   */
-    while (length && *msg_Ptr)
-    {
-        /*
-     * The buffer is in the user data segment, not the kernel segment so "*"
-     * assignment won't work. We have to use put_user which copies data from the
-     * kernel data segment to the user data segment.
-     */
-        put_user(*(msg_Ptr++), buffer++);
-        length--;
-        bytes_read++;
-    }
-
-    /*
-   * Most read functions return the number of bytes put into the buffer
-   */
-    return bytes_read;
 }
 
 static struct file *file_open(const char *path, int flags, int rights)
@@ -169,60 +132,68 @@ static int file_write(struct file *file, unsigned long long offset, unsigned cha
 }
 
 /*
- * Called when a process writes to dev file: echo "hi" > /dev/hello
+ * Called when a process writes to dev file: echo "hi" > /dev/copy
  */
 static ssize_t
-device_write(struct file *filp, const char *buf, size_t count, loff_t *off)
+device_write(struct file *filp, const char *buf, size_t count, loff_t *pos)
 {
-    size_t maxdatalen = 1000, ncopied;
-
-    if (count < maxdatalen)
+    size_t ncopied;
+    size_t i;
+    struct file *filePtr;
+    int numberOfWrittenBytes;
+    unsigned char *databuf = (unsigned char*)vzalloc(count);
+    if(!databuf)
     {
-        maxdatalen = count;
-    }
-    unsigned char databuf[maxdatalen];
-
-    ncopied = copy_from_user(databuf, buf, maxdatalen);
-
-    if (ncopied == 0)
-    {
-        printk("Copied %zd bytes from the user\n", maxdatalen);
-    }
-    else
-    {
-        printk("Could't copy %zd bytes from the user\n", ncopied);
+        printk("Couldn't allocate heap memoray\n");
+        return -1;
     }
 
-    databuf[maxdatalen] = 0;
+    ncopied = copy_from_user(databuf, buf, count);
 
-    //printk("Data from the user: %s\n", databuf);
-    size_t i = 0;
+    if (ncopied)
+    {
+        printk("Copied %zd bytes from the user\n", count);
+    }
+    filePtr = file_open("/tmp/output", O_CREAT | O_RDWR, 0);
+    if (!filePtr)
+    {
+        printk("Couldn't create File for writeing data\n");
+        vfree(databuf);
+        return -1;
+    }
     for (i = 0; i < count / 8 + 1; i++)
     {
-        unsigned char tmpbuffer[24]; //3*8
+        //Would be faster to write in a file using 24 bytes of chunks instead of writeing byte by byte
+        //sprintf returns 3 after writeing, so in case of 8 iteration the needed buffersize would be 8 * 3
+        unsigned char tmpbuffer[24]; 
         int k;
         int j = 0;
         for (k = 0; k < 7; k++)
         {
+            //needed to be checked every time for avoiding out of range databuf[.]
             if (i * 8 + k < count)
             {
                 j += sprintf(tmpbuffer + j, "%02x ", databuf[i * 8 + k]);
             }
         }
+        //8 bytes written and needed to put "\n"
         if (i * 8 + 7 < count)
         {
             j += sprintf(tmpbuffer + j, "%02x\n", databuf[i * 8 + 7]);
         }
-        struct file *f = file_open("/tmp/output", O_CREAT | O_RDWR | O_APPEND, 0);
-        if (!f)
-        {
-            printk("Couldn't create File for writeing data\n");
-            return -1;
-        }
-        file_write(f, 24 * i, tmpbuffer, j);
-        file_close(f);
-    }
+       
 
+        numberOfWrittenBytes = file_write(filePtr, i * 24, tmpbuffer, j);
+        if(numberOfWrittenBytes == 0)
+        {
+            printk("Couldn't write data to file\n");
+        }
+        else {
+            printk("Written %d bytes to the file\n", numberOfWrittenBytes);
+        }
+    }
+    file_close(filePtr);
+    vfree(databuf);
     return count;
 }
 

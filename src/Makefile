@@ -1,7 +1,7 @@
 BINARY     := chardev
 KERNEL      := /lib/modules/$(shell uname -r)/build
 ARCH        := x86
-C_FLAGS     := -Wall -std=gnu17 -O3
+C_FLAGS     := -Wall -std=gnu11
 KMOD_DIR    := $(shell pwd)
 TARGET_PATH := /lib/modules/$(shell uname -r)/kernel/drivers/char
 
